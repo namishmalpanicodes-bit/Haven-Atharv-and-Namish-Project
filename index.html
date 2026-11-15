@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Advanced Ping Pong - Editorial Edition</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Great+Vibes&family=Quicksand:wght@500;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #E4DED2; font-family: 'Quicksand', sans-serif; }
+        canvas { display: block; width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('game');
+            const ctx = canvas.getContext('2d');
+
+            function resize() {
+                canvas.width = window.innerWidth || 1280;
+                canvas.height = window.innerHeight || 720;
+            }
+            window.addEventListener('resize', resize);
+            resize();
+
+            const theme = {
+                bg: '#E4DED2',       
+                card: '#F6F4F1',    
+                border: '#d4cebe',   
+                ink: '#000000',      
+                muted: '#555555',  
+                accent: '#F95C4B',   
+                watermark: 'rgba(0, 0, 0, 0.03)',
+                btnText: '#F6F4F1'
+            };
+
+            let audioCtx = null;
+            function beep(freq, dur, type = 'sine', vol = 0.1) {
+                try {
+                    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    osc.type = type;
+                    osc.frequency.value = freq;
+                    gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + dur);
+                } catch (e) {}
+            }
+
+            const config = [
+                { label: 'MAP', options: ['THE VOID', 'GRAVITY WELL', 'PULSAR'], index: 0 },
+                { label: 'DIFFICULTY', options: ['CHILL', 'STANDARD', 'OVERDRIVE', 'INSANE'], index: 1 },
+                { label: 'BALL SIZE', options: ['MICRO', 'CLASSIC', 'HEAVY'], index: 1 },
+                { label: 'CONTROLS', options: ['INDEPENDENT (W/S + ARROWS)', 'MIRROR LINK'], index: 0 }
+            ];
+            let selectedRow = 0;
+
+            let state = 'MENU';
+            let score = 0;
+            let combo = 0;
+            let lives = 3;
+            let alignmentCount = 0;
+            let controlSwapped = false;
+            let controlStateLocked = false;
+            let swapFlash = 0;
+            let warningActive = false;
+            let lastBeepPts = 0;
+            
+            let blackoutActive = false;
+            let dualBallActive = false;
+            
+            let highScore = 0;
+            let scoreHistory = [];
+            try {
+                highScore = Number(localStorage.getItem('advanced_pingpong_best')) || 0;
+                scoreHistory = JSON.parse(localStorage.getItem('advanced_pingpong_history')) || [];
+            } catch (e) {
+                scoreHistory = [];
+            }
+
+            let shake = 0;
+            let syncFlash = 0;
+            let hitboxes = [];
+
+            let balls = [];
+            const p1 = { x: 48, y: 0, w: 14, h: 100, speed: 9 };
+            const p2 = { x: 0, y: 0, w: 14, h: 100, speed: 9 };
+            const keys = {};
+
+            window.addEventListener('keydown', e => {
+                const k = e.key.toLowerCase();
+                keys[k] = true;
+
+                if (state === 'MENU') {
+                    if (e.key === 'ArrowUp' || k === 'w') selectedRow = (selectedRow + config.length + 1) % (config.length + 2);
+                    if (e.key === 'ArrowDown' || k === 's') selectedRow = (selectedRow + 1) % (config.length + 2);
+                    
+                    if (selectedRow < config.length) {
+                        if (e.key === 'ArrowLeft' || k === 'a') {
+                            const item = config[selectedRow];
+                            item.index = (item.index + item.options.length - 1) % item.options.length;
+                            beep(300, 0.04);
+                        }
+                        if (e.key === 'ArrowRight' || k === 'd') {
+                            const item = config[selectedRow];
+                            item.index = (item.index + 1) % item.options.length;
+                            beep(400, 0.04);
+                        }
+                    }
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        if (selectedRow === config.length) randomizeAndStart();
+                        else if (selectedRow === config.length + 1) startGame();
+                    }
+                } else if (state === 'PLAY' || state === 'PAUSE') {
+                    if (e.key === ' ') {
+                        if (state === 'PLAY') state = 'PAUSE';
+                        else state = 'PLAY';
+                        beep(500, 0.08, 'triangle', 0.15);
+                    } else if (e.key === 'Escape') {
+                        state = 'MENU';
+                    }
+                }
+            });
+            window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+            canvas.addEventListener('click', e => {
+                const rect = canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                for (const box of hitboxes) {
+                    if (mx >= box.x && mx <= box.x + box.w && my >= box.y && my <= box.y + box.h) {
+                        if (box.action === 'START') startGame();
+                        else if (box.action === 'RANDOM') randomizeAndStart();
+                        else if (box.action === 'MENU') state = 'MENU';
+                        else if (box.action === 'RESPAWN') startGame();
+                        else if (state === 'MENU' && box.row !== undefined) {
+                            selectedRow = box.row;  
+                            const item = config[box.row];
+                            item.index = (item.index + 1) % item.options.length;
+                            beep(400, 0.04);
+                        }
+                        break;
+                    }
+                }
+            });
+
+            function randomizeAndStart() {
+                config.forEach(item => {
+                    item.index = Math.floor(Math.random() * item.options.length);
+                });
+                beep(800, 0.2, 'square', 0.2);
+                startGame();
+            }
+
+            function startGame() {
+                beep(600, 0.15, 'square', 0.15);
+                const diff = config[1].options[config[1].index];
+                const size = config[2].options[config[2].index];
+
+                let r = size === 'MICRO' ? 8 : size === 'CLASSIC' ? 12 : 18;
+
+                let hRatio = 0.22;
+                if (diff === 'CHILL') hRatio = 0.26;
+                if (diff === 'OVERDRIVE') hRatio = 0.17;
+                if (diff === 'INSANE') hRatio = 0.12;
+
+                p1.h = p2.h = canvas.height * hRatio;
+                p1.x = 50;
+                p2.x = canvas.width - 64;
+                p1.y = p2.y = (canvas.height - p1.h) / 2;
+                p1.speed = p2.speed = canvas.height * 0.014;
+
+                score = 0;
+                combo = 0;
+                lives = 3;
+                alignmentCount = 0;
+                controlSwapped = false;
+                controlStateLocked = false;
+                swapFlash = 0;
+                warningActive = false;
+                lastBeepPts = 0;
+                blackoutActive = false;
+                dualBallActive = false;
+                shake = 0;
+
+                balls = [];
+                spawnBall(Math.random() > 0.5 ? 1 : -1, r);
+                state = 'PLAY';
+            }
+
+            function recordGameOver() {
+                if (score > 0) {
+                    try {
+                        scoreHistory.unshift(score);
+                        if (scoreHistory.length > 5) scoreHistory.pop();
+                        localStorage.setItem('advanced_pingpong_history', JSON.stringify(scoreHistory));
+
+                        if (score > highScore) {
+                            highScore = score;
+                            localStorage.setItem('advanced_pingpong_best', highScore);
+                        }
+                    } catch (e) {}
+                }
+            }
+
+            function spawnBall(dir, r = 12) {
+                const diff = config[1].options[config[1].index];
+                let speedFactor = 0.007;
+                if (diff === 'CHILL') speedFactor = 0.0055;
+                if (diff === 'OVERDRIVE') speedFactor = 0.009;
+                if (diff === 'INSANE') speedFactor = 0.012;
+
+                const speed = canvas.width * speedFactor;
+                const angle = (Math.random() * Math.PI / 3) - (Math.PI / 6);
+
+                balls.push({
+                    x: canvas.width / 2,
+                    y: canvas.height / 2,
+                    vx: speed * Math.cos(angle) * dir,
+                    vy: speed * Math.sin(angle),
+                    r: r,
+                    trail: [],
+                    ghosts: []
+                });
+            }
+
+            function update() {
+                if (state !== 'PLAY') return;
+                if (shake > 0) shake--;
+
+                const ctrl = config[3].options[config[3].index];
+
+                if (ctrl.startsWith('INDEPENDENT') && !controlStateLocked) {
+                    if (score >= 7 && score < 10) {
+                        warningActive = true;
+                        const ptsAway = 10 - score;
+                        if (ptsAway !== lastBeepPts) {
+                            lastBeepPts = ptsAway;
+                            beep(550, 0.08, 'sine', 0.15);
+                        }
+                    } else if (score >= 10 && score < 20) {
+                        warningActive = false;
+                        if (!controlSwapped) {
+                            controlSwapped = true;
+                            swapFlash = 60;
+                            shake = 14;
+                            beep(850, 0.25, 'square', 0.2);
+                        }
+                    } else if (score >= 20) {
+                        if (controlSwapped) {
+                            controlSwapped = false;
+                            controlStateLocked = true;
+                            swapFlash = 60;
+                            shake = 14;
+                            beep(700, 0.25, 'square', 0.2);
+                        }
+                    }
+                }
+
+                if (!blackoutActive && score >= 20 && score < 30) {
+                    blackoutActive = true;
+                    beep(200, 0.4, 'sawtooth', 0.2);
+                } else if (blackoutActive && score >= 30) {
+                    blackoutActive = false;
+                }
+
+                if (!dualBallActive && score >= 30 && balls.length === 1) {
+                    dualBallActive = true;
+                    beep(700, 0.3, 'square', 0.25);
+                    const b = balls[0];
+                    balls.push({
+                        x: canvas.width / 2,
+                        y: canvas.height / 2,
+                        vx: b.vx,
+                        vy: b.vy,
+                        r: b.r,
+                        trail: [],
+                        ghosts: []
+                    });
+                }
+
+                const map = config[0].options[config[0].index];
+
+                if (ctrl.startsWith('INDEPENDENT')) {
+                    if (!controlSwapped) {
+                        if (keys['w']) p1.y -= p1.speed;
+                        if (keys['s']) p1.y += p1.speed;
+                        if (keys['arrowup']) p2.y -= p2.speed;
+                        if (keys['arrowdown']) p2.y += p2.speed;
+                    } else {
+                        if (keys['w']) p2.y -= p2.speed;
+                        if (keys['s']) p2.y += p2.speed;
+                        if (keys['arrowup']) p1.y -= p1.speed;
+                        if (keys['arrowdown']) p1.y += p1.speed;
+                    }
+                } else {
+                    let dir = 0;
+                    if (keys['w'] || keys['arrowup']) dir = -1;
+                    if (keys['s'] || keys['arrowdown']) dir = 1;
+                    p1.y += dir * p1.speed;
+                    p2.y += dir * p2.speed;
+                }
+
+                p1.y = Math.max(20, Math.min(canvas.height - p1.h - 20, p1.y));
+                p2.y = Math.max(20, Math.min(canvas.height - p2.h - 20, p2.y));
+
+                if (map === 'GRAVITY WELL') {
+                    balls.forEach(ball => {
+                        const dx = (canvas.width / 2) - ball.x;
+                        const dy = (canvas.height / 2) - ball.y;
+                        const dist = Math.hypot(dx, dy);
+                        const pullRadius = Math.min(canvas.width, canvas.height) * 0.3;
+                        if (dist < pullRadius && dist > 5) {
+                            ball.vx += (dx / dist) * 0.16;
+                            ball.vy += (dy / dist) * 0.16;
+                        }
+                    });
+                }
+
+                for (let i = balls.length - 1; i >= 0; i--) {
+                    const ball = balls[i];
+
+                    ball.trail.push({ x: ball.x, y: ball.y });
+                    if (ball.trail.length > 8) ball.trail.shift();
+
+                    if (Math.hypot(ball.vx, ball.vy) > 10 || combo > 2) {
+                        if (Math.random() < 0.4) {
+                            ball.ghosts.push({ x: ball.x, y: ball.y, r: ball.r, alpha: 0.35 });
+                        }
+                    }
+                    for (let g = ball.ghosts.length - 1; g >= 0; g--) {
+                        ball.ghosts[g].alpha -= 0.015;
+                        if (ball.ghosts[g].alpha <= 0) ball.ghosts.splice(g, 1);
+                    }
+
+                    ball.x += ball.vx;
+                    ball.y += ball.vy;
+
+                    let topBoundary = 20;
+                    let bottomBoundary = canvas.height - 20;
+                    if (map === 'PULSAR') {
+                        let pulseOffset = Math.sin(Date.now() * 0.004) * (canvas.height * 0.12);
+                        topBoundary = 20 + Math.max(0, pulseOffset);
+                        bottomBoundary = (canvas.height - 20) - Math.max(0, pulseOffset);
+                    }
+
+                    if (ball.y - ball.r < topBoundary) { 
+                        ball.y = topBoundary + ball.r; 
+                        ball.vy *= -1; 
+                        beep(250, 0.05, 'triangle'); 
+                    }
+                    if (ball.y + ball.r > bottomBoundary) { 
+                        ball.y = bottomBoundary - ball.r; 
+                        ball.vy *= -1; 
+                        beep(250, 0.05, 'triangle'); 
+                    }
+
+                    if (ball.x < 20 || ball.x > canvas.width - 20) {
+                        beep(100, 0.3, 'sawtooth', 0.25);
+                        shake = 16;
+                        combo = 0;
+                        lives--;
+
+                        if (lives <= 0) {
+                            shake = 0;
+                            recordGameOver();
+                            state = 'GAMEOVER';
+                            return;
+                        } else {
+                            balls = [];
+                            spawnBall(ball.x < canvas.width / 2 ? 1 : -1, ball.r);
+                            break;
+                        }
+                    }
+
+                    if (ball.vx < 0 && ball.x - ball.r <= p1.x + p1.w && ball.x + ball.r >= p1.x &&
+                        ball.y + ball.r >= p1.y && ball.y - ball.r <= p1.y + p1.h) {
+                        hitPaddle(ball, p1, 1);
+                    }
+
+                    if (ball.vx > 0 && ball.x + ball.r >= p2.x && ball.x - ball.r <= p2.x + p2.w &&
+                        ball.y + ball.r >= p2.y && ball.y - ball.r <= p2.y + p2.h) {
+                        hitPaddle(ball, p2, -1);
+                    }
+                }
+            }
+
+            function hitPaddle(ball, paddle, dir) {
+                const offset = (ball.y - (paddle.y + paddle.h / 2)) / (paddle.h / 2);
+                let speed = Math.hypot(ball.vx, ball.vy);
+                const angle = offset * (Math.PI / 3);
+
+                combo++;
+                const aligned = Math.abs(p1.y - p2.y) < 18;
+                
+                if (aligned) {
+                    alignmentCount++;
+                    syncFlash = 25;
+                    shake = 10;
+                    beep(920, 0.18, 'square', 0.2);
+
+                    // Every 5 alignments, grant an extra life!
+                    if (alignmentCount % 5 === 0) {
+                        lives++;
+                        beep(1200, 0.3, 'triangle', 0.25);
+                    }
+                } else {
+                    beep(400 + (combo * 35), 0.08, 'sine', 0.15);
+                }
+
+                score += (aligned ? 3 : 1) + Math.floor(combo / 3);
+
+                ball.vx = dir * speed * Math.cos(angle);
+                ball.vy = speed * Math.sin(angle);
+                ball.x = dir === 1 ? paddle.x + paddle.w + ball.r : paddle.x - ball.r;
+
+                if (score > highScore) {
+                    highScore = score;
+                    try {
+                        localStorage.setItem('advanced_pingpong_best', highScore);
+                    } catch (e) {}
+                }
+            }
+
+            function drawMenu(t) {
+                const cx = canvas.width / 2;
+                const cy = canvas.height / 2;
+
+                ctx.textAlign = 'center';
+                
+                ctx.fillStyle = t.ink;
+                ctx.font = 'normal 64px "Great Vibes", cursive';
+                ctx.fillText('Advanced Ping Pong', cx, cy - 200);
+
+                ctx.fillStyle = t.muted;
+                ctx.font = '600 13px "Quicksand", sans-serif';
+                ctx.fillText('by Namish and Atharv', cx, cy - 155);
+
+                ctx.fillStyle = t.accent;
+                ctx.font = '700 14px "Quicksand", sans-serif';
+                ctx.fillText(`HIGH SCORE: ${highScore}`, cx, cy - 128);
+
+                config.forEach((item, i) => {
+                    const y = cy - 85 + i * 44;
+                    const active = i === selectedRow;
+
+                    if (active) {
+                        ctx.fillStyle = t.card;
+                        ctx.fillRect(cx - 280, y - 22, 560, 34);
+                        ctx.strokeStyle = t.accent;
+                        ctx.lineWidth = 1.5;
+                        ctx.strokeRect(cx - 280, y - 22, 560, 34);
+                    }
+
+                    ctx.font = active ? '700 20px "Cormorant Garamond", serif' : '600 18px "Cormorant Garamond", serif';
+                    ctx.fillStyle = active ? t.accent : t.ink;
+                    ctx.fillText(`${item.label}:   ‹ ${item.options[item.index]} ›`, cx, y);
+                    hitboxes.push({ x: cx - 280, y: y - 22, w: 560, h: 34, row: i });
+                });
+
+                if (scoreHistory.length > 0) {
+                    ctx.textAlign = 'left';
+                    ctx.fillStyle = t.muted;
+                    ctx.font = '700 11px "Quicksand", sans-serif';
+                    ctx.fillText('RECENT:', cx - 270, cy + 98);
+                    scoreHistory.slice(0, 3).forEach((s, idx) => {
+                        ctx.fillText(`#${idx + 1}: ${s} pts`, cx - 270, cy + 114 + (idx * 15));
+                    });
+                }
+
+                const btnY = cy + 115;
+                
+                const isRandActive = selectedRow === config.length;
+                ctx.fillStyle = isRandActive ? t.card : t.muted;
+                ctx.fillRect(cx - 220, btnY, 210, 42);
+                ctx.strokeStyle = isRandActive ? t.accent : 'transparent';
+                ctx.lineWidth = 1.5;
+                if (isRandActive) ctx.strokeRect(cx - 220, btnY, 210, 42);
+                ctx.fillStyle = isRandActive ? t.accent : t.btnText;
+                ctx.font = '700 14px "Quicksand", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('🎲 RANDOMIZE', cx - 115, btnY + 26);
+                hitboxes.push({ x: cx - 220, y: btnY, w: 210, h: 42, action: 'RANDOM' });
+
+                const isPlayActive = selectedRow === config.length + 1;
+                ctx.fillStyle = t.accent;
+                ctx.fillRect(cx + 10, btnY, 210, 42);
+                if (isPlayActive) {
+                    ctx.strokeStyle = t.ink;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(cx + 10, btnY, 210, 42);
+                }
+                ctx.fillStyle = t.btnText;
+                ctx.fillText('PLAY NOW', cx + 115, btnY + 26);
+                hitboxes.push({ x: cx + 10, y: btnY, w: 210, h: 42, action: 'START' });
+            }
+
+            function draw() {
+                hitboxes = [];
+                const t = theme;
+
+                ctx.save();
+                if (shake > 0) {
+                    ctx.translate((Math.random() - 0.5) * 18, 0);
+                }
+
+                if (blackoutActive && state === 'PLAY') {
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    ctx.fillStyle = t.card;
+                    ctx.fillRect(p1.x, p1.y, p1.w, p1.h);
+                    ctx.fillRect(p2.x, p2.y, p2.w, p2.h);
+
+                    balls.forEach(ball => {
+                        ball.ghosts.forEach(g => {
+                            ctx.fillStyle = t.accent;
+                            ctx.globalAlpha = Math.max(0, g.alpha * 0.7);
+                            ctx.beginPath();
+                            ctx.arc(g.x, g.y, g.r * 0.8, 0, Math.PI * 2);
+                            ctx.fill();
+                        });
+                        ctx.globalAlpha = 1;
+
+                        ball.trail.forEach((pt, idx) => {
+                            ctx.fillStyle = t.accent;
+                            ctx.globalAlpha = (idx + 1) / 20;
+                            ctx.beginPath();
+                            ctx.arc(pt.x, pt.y, ball.r * ((idx + 1) / 7), 0, Math.PI * 2);
+                            ctx.fill();
+                        });
+                        ctx.globalAlpha = 1;
+                    });
+
+                    ctx.restore();
+                    return;
+                }
+
+                ctx.fillStyle = t.bg;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                ctx.strokeStyle = t.border;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(20, 20, canvas.width - 40, canvas.height - 40);
+
+                if (state === 'MENU') {
+                    drawMenu(t);
+                    ctx.restore();
+                    return;
+                }
+
+                const map = config[0].options[config[0].index];
+
+                ctx.fillStyle = t.watermark;
+                ctx.font = `700 ${Math.min(canvas.width, canvas.height) * 0.38}px "Quicksand", sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.fillText(score, canvas.width / 2, canvas.height / 2 + 90);
+
+                if (map === 'GRAVITY WELL') {
+                    const r = Math.min(canvas.width, canvas.height) * 0.28;
+                    ctx.strokeStyle = t.accent;
+                    ctx.globalAlpha = 0.35;
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([8, 8]);
+                    ctx.beginPath();
+                    ctx.arc(canvas.width / 2, canvas.height / 2, r, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.globalAlpha = 1;
+                } else if (map === 'PULSAR') {
+                    let pulseOffset = Math.sin(Date.now() * 0.004) * (canvas.height * 0.12);
+                    let topY = 20 + Math.max(0, pulseOffset);
+                    let botY = (canvas.height - 20) - Math.max(0, pulseOffset);
+
+                    ctx.strokeStyle = t.accent;
+                    ctx.globalAlpha = 0.45;
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([6, 6]);
+                    ctx.beginPath();
+                    ctx.moveTo(20, topY); ctx.lineTo(canvas.width - 20, topY);
+                    ctx.moveTo(20, botY); ctx.lineTo(canvas.width - 20, botY);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.globalAlpha = 1;
+                }
+
+                if (Math.abs(p1.y - p2.y) < 18) {
+                    ctx.strokeStyle = syncFlash > 0 ? t.accent : t.ink;
+                    ctx.lineWidth = syncFlash > 0 ? 3 : 2;
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x + p1.w, p1.y + p1.h / 2);
+                    ctx.lineTo(p2.x, p2.y + p2.h / 2);
+                    ctx.stroke();
+                }
+                if (syncFlash > 0) syncFlash--;
+
+                balls.forEach(ball => {
+                    ball.ghosts.forEach(g => {
+                        ctx.fillStyle = t.accent;
+                        ctx.globalAlpha = Math.max(0, g.alpha * 0.5);
+                        ctx.beginPath();
+                        ctx.arc(g.x, g.y, g.r * 0.8, 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                    ctx.globalAlpha = 1;
+
+                    ball.trail.forEach((pt, idx) => {
+                        ctx.fillStyle = t.accent;
+                        ctx.globalAlpha = (idx + 1) / 30;
+                        ctx.beginPath();
+                        ctx.arc(pt.x, pt.y, ball.r * ((idx + 1) / 7), 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                    ctx.globalAlpha = 1;
+
+                    ctx.fillStyle = t.accent;
+                    ctx.beginPath();
+                    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                ctx.fillStyle = t.ink;
+                ctx.fillRect(p1.x, p1.y, p1.w, p1.h);
+                ctx.fillRect(p2.x, p2.y, p2.w, p2.h);
+
+                ctx.fillStyle = t.muted;
+                ctx.font = '700 14px "Quicksand", sans-serif';
+                ctx.textAlign = 'left';
+                let hudText = `BEST: ${highScore}   |   SCORE: ${score}   |   🎯 ALIGNMENTS: ${alignmentCount}   |   LIVES: ${'❤️ '.repeat(lives)}`;
+                if (combo > 1) hudText += `   |   COMBO x${combo}`;
+                if (controlSwapped) hudText += `   |   CONTROLS: SWAPPED`;
+                ctx.fillText(hudText, 42, 50);
+
+                if (warningActive) {
+                    const ptsLeft = 10 - score;
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = t.accent;
+                    ctx.font = '700 28px "Cormorant Garamond", serif';
+                    ctx.fillText(`⚠️ CONTROLS SWITCH IN ${ptsLeft} PTS... ⚠️`, canvas.width / 2, 95);
+                }
+
+                if (swapFlash > 0) {
+                    const cx = canvas.width / 2;
+                    const cy = canvas.height / 2;
+                    
+                    ctx.fillStyle = t.card;
+                    ctx.fillRect(cx - 210, cy - 35, 420, 70);
+                    ctx.strokeStyle = t.accent;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(cx - 210, cy - 35, 420, 70);
+
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = t.accent;
+                    ctx.font = '700 28px "Cormorant Garamond", serif';
+                    ctx.fillText('CONTROLS SWITCHED', cx, cy + 9);
+                    
+                    if (state === 'PLAY') swapFlash--;
+                }
+
+                const menuBtnX = canvas.width - 42;
+                ctx.textAlign = 'right';
+                ctx.fillStyle = t.muted;
+                ctx.font = '700 14px "Quicksand", sans-serif';
+                ctx.fillText(`[ESC] MENU`, menuBtnX, 50);
+                hitboxes.push({ x: menuBtnX - 100, y: 28, w: 110, h: 34, action: 'MENU' });
+
+                if (state === 'PAUSE') {
+                    ctx.fillStyle = 'rgba(228, 222, 210, 0.85)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = t.ink;
+                    ctx.font = 'normal 64px "Great Vibes", cursive';
+                    ctx.fillText('Game Paused', canvas.width / 2, canvas.height / 2 - 20);
+
+                    ctx.fillStyle = t.accent;
+                    ctx.font = '700 16px "Quicksand", sans-serif';
+                    ctx.fillText('Press [SPACE] to Resume  |  Press [ESC] for Menu', canvas.width / 2, canvas.height / 2 + 30);
+                }
+
+                if (state === 'GAMEOVER') {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    const cx = canvas.width / 2;
+                    const cy = canvas.height / 2;
+
+                    ctx.fillStyle = t.card;
+                    ctx.fillRect(cx - 240, cy - 130, 480, 260);
+                    ctx.strokeStyle = t.accent;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(cx - 240, cy - 130, 480, 260);
+
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = t.ink;
+                    ctx.font = 'normal 56px "Great Vibes", cursive';
+                    ctx.fillText('Game Over', cx, cy - 65);
+
+                    ctx.fillStyle = t.accent;
+                    ctx.font = '700 18px "Quicksand", sans-serif';
+                    ctx.fillText(`FINAL SCORE: ${score}  |  🎯 ALIGNMENTS: ${alignmentCount}`, cx, cy - 25);
+
+                    ctx.fillStyle = t.accent;
+                    ctx.fillRect(cx - 210, cy + 15, 195, 42);
+                    ctx.fillStyle = t.btnText;
+                    ctx.font = '700 14px "Quicksand", sans-serif';
+                    ctx.fillText('RESPAWN', cx - 112, cy + 42);
+                    hitboxes.push({ x: cx - 210, y: cy + 15, w: 195, h: 42, action: 'RESPAWN' });
+
+                    ctx.fillStyle = t.muted;
+                    ctx.fillRect(cx + 15, cy + 15, 195, 42);
+                    ctx.fillStyle = t.btnText;
+                    ctx.fillText('MAIN MENU', cx + 112, cy + 42);
+                    hitboxes.push({ x: cx + 15, y: cy + 15, w: 195, h: 42, action: 'MENU' });
+                }
+
+                ctx.restore();
+            }
+
+            function loop() {
+                update();
+                draw();
+                requestAnimationFrame(loop);
+            }
+            requestAnimationFrame(loop);
+        });
+    </script>
+</body>
+</html>
